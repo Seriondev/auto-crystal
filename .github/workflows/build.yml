@@ -1,0 +1,297 @@
+name: Build AutoCrystal Mod (Fabric 1.21.11)
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.2.0
+
+      - name: Generate mod project
+        run: |
+          set -euo pipefail
+
+          # Kombinasi versi resmi untuk Minecraft 1.21.11
+          MC="1.21.11"
+          YARN="1.21.11+build.4"
+          LOADER="0.18.1"
+          FAPI="0.141.1+1.21.11"
+
+          mkdir -p mod
+          cd mod
+
+          printf '%s\n' \
+            "org.gradle.jvmargs=-Xmx2G" \
+            "org.gradle.parallel=true" \
+            "minecraft_version=${MC}" \
+            "yarn_mappings=${YARN}" \
+            "loader_version=${LOADER}" \
+            "fabric_version=${FAPI}" \
+            > gradle.properties
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  maven {
+                      name = 'Fabric'
+                      url = 'https://maven.fabricmc.net/'
+                  }
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          rootProject.name = 'autocrystal'
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'fabric-loom' version '1.14-SNAPSHOT'
+          }
+
+          base {
+              archivesName = 'autocrystal'
+          }
+
+          version = '1.0.0'
+          group = 'com.example.autocrystal'
+
+          dependencies {
+              minecraft "com.mojang:minecraft:${project.minecraft_version}"
+              mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+              modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+              modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+          }
+
+          tasks.withType(JavaCompile).configureEach {
+              options.release = 21
+              options.encoding = 'UTF-8'
+          }
+
+          java {
+              sourceCompatibility = JavaVersion.VERSION_21
+              targetCompatibility = JavaVersion.VERSION_21
+          }
+          EOF
+
+          mkdir -p src/main/resources
+          mkdir -p src/main/java/com/example/autocrystal
+
+          cat > src/main/resources/fabric.mod.json <<'EOF'
+          {
+            "schemaVersion": 1,
+            "id": "autocrystal",
+            "version": "1.0.0",
+            "name": "Auto Crystal",
+            "description": "Pegang end crystal lalu klik kanan obsidian/bedrock: crystal otomatis dipukul. Toggle: /autocrystal",
+            "license": "MIT",
+            "environment": "client",
+            "entrypoints": {
+              "client": ["com.example.autocrystal.AutoCrystalClient"]
+            },
+            "depends": {
+              "fabricloader": ">=0.16.0",
+              "minecraft": "1.21.11",
+              "java": ">=21",
+              "fabric-api": "*"
+            }
+          }
+          EOF
+
+          cat > src/main/java/com/example/autocrystal/AutoCrystalClient.java <<'EOF'
+          package com.example.autocrystal;
+
+          import java.util.List;
+          import net.fabricmc.api.ClientModInitializer;
+          import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
+          import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
+          import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+          import net.minecraft.block.BlockState;
+          import net.minecraft.block.Blocks;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.network.ClientPlayerEntity;
+          import net.minecraft.client.world.ClientWorld;
+          import net.minecraft.entity.decoration.EndCrystalEntity;
+          import net.minecraft.item.Items;
+          import net.minecraft.text.Text;
+          import net.minecraft.util.Hand;
+          import net.minecraft.util.hit.BlockHitResult;
+          import net.minecraft.util.hit.HitResult;
+          import net.minecraft.util.math.BlockPos;
+          import net.minecraft.util.math.Box;
+
+          public class AutoCrystalClient implements ClientModInitializer {
+              private static final int WAIT_TICKS = 20;      // maksimal nunggu crystal muncul (20 tick = 1 detik)
+              private static final int AFTER_HIT_TICKS = 3;  // jeda kecil setelah mukul biar nggak dobel
+
+              private static boolean enabled = true;
+              private static BlockPos pending = null;
+              private static int pendingTicks = 0;
+              private static int cooldown = 0;
+
+              @Override
+              public void onInitializeClient() {
+                  ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) ->
+                      dispatcher.register(ClientCommandManager.literal("autocrystal").executes(context -> {
+                          enabled = !enabled;
+                          pending = null;
+                          context.getSource().sendFeedback(Text.literal("AutoCrystal: " + (enabled ? "ON" : "OFF")));
+                          return 1;
+                      }))
+                  );
+
+                  ClientTickEvents.START_CLIENT_TICK.register(AutoCrystalClient::tick);
+              }
+
+              private static void tick(MinecraftClient client) {
+                  ClientPlayerEntity player = client.player;
+                  ClientWorld world = client.world;
+
+                  // Mati kalau dimatiin lewat /autocrystal, atau lagi chat / menu / GUI kebuka
+                  if (!enabled || player == null || world == null || client.currentScreen != null) {
+                      pending = null;
+                      cooldown = 0;
+                      return;
+                  }
+
+                  if (cooldown > 0) {
+                      cooldown--;
+                  }
+
+                  // Lagi nunggu crystal muncul di atas blok yang tadi diklik
+                  if (pending != null) {
+                      EndCrystalEntity crystal = findCrystal(world, pending);
+                      if (crystal != null) {
+                          if (client.interactionManager != null) {
+                              client.interactionManager.attackEntity(player, crystal);
+                              player.swingHand(Hand.MAIN_HAND);
+                          }
+                          pending = null;
+                          cooldown = AFTER_HIT_TICKS;
+                          return;
+                      }
+                      pendingTicks--;
+                      if (pendingTicks <= 0) {
+                          pending = null;
+                      }
+                      return;
+                  }
+
+                  if (cooldown > 0) {
+                      return;
+                  }
+
+                  // Pegang crystal (tangan utama / offhand) + klik kanan ditahan/ditekan
+                  boolean holdingCrystal = player.getMainHandStack().isOf(Items.END_CRYSTAL)
+                      || player.getOffHandStack().isOf(Items.END_CRYSTAL);
+                  if (!holdingCrystal || !client.options.useKey.isPressed()) {
+                      return;
+                  }
+
+                  // Crosshair harus ngarah ke obsidian atau bedrock
+                  if (!(client.crosshairTarget instanceof BlockHitResult blockHit)) {
+                      return;
+                  }
+                  if (blockHit.getType() != HitResult.Type.BLOCK) {
+                      return;
+                  }
+                  BlockPos pos = blockHit.getBlockPos();
+                  BlockState state = world.getBlockState(pos);
+                  if (state.isOf(Blocks.OBSIDIAN) || state.isOf(Blocks.BEDROCK)) {
+                      pending = pos;
+                      pendingTicks = WAIT_TICKS;
+                  }
+              }
+
+              // Cari end crystal tepat di atas blok target
+              private static EndCrystalEntity findCrystal(ClientWorld world, BlockPos base) {
+                  double cx = base.getX() + 0.5;
+                  double cz = base.getZ() + 0.5;
+                  Box box = new Box(base.getX(), base.getY() + 1.0, base.getZ(),
+                      base.getX() + 1.0, base.getY() + 3.0, base.getZ() + 1.0);
+                  List<EndCrystalEntity> found = world.getEntitiesByClass(EndCrystalEntity.class, box,
+                      c -> c.isAlive() && Math.abs(c.getX() - cx) < 0.25 && Math.abs(c.getZ() - cz) < 0.25);
+                  return found.isEmpty() ? null : found.get(0);
+              }
+          }
+          EOF
+
+          echo "Struktur project:"
+          find . -type f | sort
+
+      - name: Build
+        working-directory: mod
+        run: |
+          set +e
+          for LOOM in 1.14-SNAPSHOT "1.14.+"; do
+            echo "=== Coba Loom ${LOOM} ==="
+            sed -i "s/id 'fabric-loom' version '[^']*'/id 'fabric-loom' version '${LOOM}'/" build.gradle
+            if gradle build --no-daemon --stacktrace; then
+              echo "Build sukses dengan Loom ${LOOM}"
+              exit 0
+            fi
+          done
+          echo "Semua percobaan build gagal"
+          exit 1
+
+      - name: Prepare jar
+        run: |
+          mkdir -p dist
+          cp mod/build/libs/autocrystal-1.0.0.jar dist/autocrystal-1.0.0-mc1.21.11.jar
+
+      - name: Upload mod jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoCrystal-1.21.11
+          path: dist/*.jar
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download jar
+        uses: actions/download-artifact@v4
+        with:
+          name: AutoCrystal-1.21.11
+          path: dist
+
+      - name: Publish GitHub Release
+        continue-on-error: true
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: autocrystal-v1.0.0
+          target_commitish: ${{ github.sha }}
+          name: "Auto Crystal v1.0.0 (Minecraft 1.21.11)"
+          make_latest: true
+          fail_on_unmatched_files: true
+          files: dist/*.jar
+          body: |
+            # Auto Crystal v1.0.0
+
+            Mod client-side (Fabric) untuk Minecraft 1.21.11.
+            Pegang end crystal, klik kanan obsidian atau bedrock, crystal otomatis dipukul begitu muncul.
+
+            Download: `autocrystal-1.0.0-mc1.21.11.jar`
+            Butuh Fabric Loader dan Fabric API.
+
+            ## Cara pakai
+            - Pegang end crystal (tangan utama atau offhand), arahkan crosshair ke obsidian/bedrock, klik kanan.
+            - Ketik `/autocrystal` untuk ON/OFF (default ON).
+            - Nggak aktif saat chat atau menu kebuka.
