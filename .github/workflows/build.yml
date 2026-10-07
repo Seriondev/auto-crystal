@@ -1,4 +1,4 @@
-name: Build AutoCrystal Mod (Fabric 1.21.11)
+name: Build AutoCrystal Mod (Fabric 1.21.10)
 
 on:
   push:
@@ -20,17 +20,25 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: 9.2.0
+          gradle-version: 9.1.0
 
       - name: Generate mod project
         run: |
           set -euo pipefail
 
-          # Kombinasi versi resmi untuk Minecraft 1.21.11
-          MC="1.21.11"
-          YARN="1.21.11+build.4"
-          LOADER="0.18.1"
-          FAPI="0.141.1+1.21.11"
+          MC="1.21.10"
+
+          YARN=$(curl -fsSL "https://meta.fabricmc.net/v2/versions/yarn/${MC}" | jq -r '.[0].version') || true
+          LOADER=$(curl -fsSL "https://meta.fabricmc.net/v2/versions/loader" | jq -r '[.[] | select(.stable == true)][0].version') || true
+          FAPI=$(curl -fsSL "https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-api/maven-metadata.xml" | grep -o "<version>[^<]*+${MC}</version>" | sed -e 's/<version>//' -e 's/<\/version>//' | tail -n 1) || true
+
+          echo "Yarn   : ${YARN}"
+          echo "Loader : ${LOADER}"
+          echo "FabricAPI: ${FAPI}"
+
+          if [ -z "${YARN}" ] || [ "${YARN}" = "null" ]; then echo "Yarn version tidak ketemu"; exit 1; fi
+          if [ -z "${LOADER}" ] || [ "${LOADER}" = "null" ]; then echo "Loader version tidak ketemu"; exit 1; fi
+          if [ -z "${FAPI}" ]; then echo "Fabric API version tidak ketemu"; exit 1; fi
 
           mkdir -p mod
           cd mod
@@ -60,7 +68,7 @@ jobs:
 
           cat > build.gradle <<'EOF'
           plugins {
-              id 'fabric-loom' version '1.14-SNAPSHOT'
+              id 'fabric-loom' version '1.12-SNAPSHOT'
           }
 
           base {
@@ -105,7 +113,7 @@ jobs:
             },
             "depends": {
               "fabricloader": ">=0.16.0",
-              "minecraft": "1.21.11",
+              "minecraft": "1.21.10",
               "java": ">=21",
               "fabric-api": "*"
             }
@@ -237,7 +245,7 @@ jobs:
         working-directory: mod
         run: |
           set +e
-          for LOOM in 1.14-SNAPSHOT "1.14.+"; do
+          for LOOM in 1.12-SNAPSHOT 1.13-SNAPSHOT; do
             echo "=== Coba Loom ${LOOM} ==="
             sed -i "s/id 'fabric-loom' version '[^']*'/id 'fabric-loom' version '${LOOM}'/" build.gradle
             if gradle build --no-daemon --stacktrace; then
@@ -251,12 +259,12 @@ jobs:
       - name: Prepare jar
         run: |
           mkdir -p dist
-          cp mod/build/libs/autocrystal-1.0.0.jar dist/autocrystal-1.0.0-mc1.21.11.jar
+          cp mod/build/libs/autocrystal-1.0.0.jar dist/autocrystal-1.0.0-mc1.21.10.jar
 
       - name: Upload mod jar
         uses: actions/upload-artifact@v4
         with:
-          name: AutoCrystal-1.21.11
+          name: AutoCrystal-1.21.10
           path: dist/*.jar
           if-no-files-found: error
 
@@ -269,26 +277,26 @@ jobs:
       - name: Download jar
         uses: actions/download-artifact@v4
         with:
-          name: AutoCrystal-1.21.11
+          name: AutoCrystal-1.21.10
           path: dist
 
       - name: Publish GitHub Release
         continue-on-error: true
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: autocrystal-v1.0.0
+          tag_name: autocrystal-v1.0.0-mc1.21.10
           target_commitish: ${{ github.sha }}
-          name: "Auto Crystal v1.0.0 (Minecraft 1.21.11)"
-          make_latest: true
+          name: "Auto Crystal v1.0.0 (Minecraft 1.21.10)"
+          make_latest: false
           fail_on_unmatched_files: true
           files: dist/*.jar
           body: |
-            # Auto Crystal v1.0.0
+            # Auto Crystal v1.0.0 (Minecraft 1.21.10)
 
-            Mod client-side (Fabric) untuk Minecraft 1.21.11.
+            Mod client-side (Fabric) untuk Minecraft 1.21.10.
             Pegang end crystal, klik kanan obsidian atau bedrock, crystal otomatis dipukul begitu muncul.
 
-            Download: `autocrystal-1.0.0-mc1.21.11.jar`
+            Download: `autocrystal-1.0.0-mc1.21.10.jar`
             Butuh Fabric Loader dan Fabric API.
 
             ## Cara pakai
